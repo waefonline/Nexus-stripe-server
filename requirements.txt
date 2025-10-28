@@ -1,0 +1,8 @@
+# Dependencias para Nexus Copier - Stripe Server
+# Python 3.8 o superior requerido
+
+Flask==3.0.0
+flask-cors==4.0.0
+stripe==8.2.0
+gunicorn==21.2.0
+python-dotenv==1.0.0
