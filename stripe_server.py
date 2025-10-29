@@ -33,9 +33,15 @@ def create_checkout_session():
             line_items=[{"price": PRICE_MAP[plan], "quantity": 1}],
             success_url=f"{DOMAIN}/success.html",
             cancel_url=f"{DOMAIN}/cancel.html",
+            payment_method_types=["card", "paypal", "revolut_pay", "amazon_pay", "naver_pay", "link", "payco", "bancontact", "blik", "eps", "klarna"],  # 👈 Fuerza a mostrar tarjeta
+            automatic_payment_methods={
+                "enabled": True,
+                "allow_redirects": "never"   # 👈 Evita que Stripe abra directamente Link
+            },
             automatic_tax={"enabled": False},
             metadata={"plan": plan}
         )
+
         return jsonify({"sessionId": session.id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
