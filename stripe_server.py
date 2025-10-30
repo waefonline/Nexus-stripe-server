@@ -24,21 +24,31 @@ PRICE_MAP = {
 def create_checkout_session():
     data = request.get_json() or {}
     plan = data.get("plan")
-    lang = (data.get("lang") or "en").lower()
+    lang = (data.get("lang") or "").lower()
+
+    # Aseguramos que el idioma sea correcto
+    if lang not in ["es", "en"]:
+        lang = "en"
 
     if plan not in PRICE_MAP:
         return jsonify({"error": "Plan inválido"}), 400
 
-    # Prefijo de idioma en URLs
+    # Definir prefijo de idioma
     lang_prefix = "/es" if lang == "es" else ""
 
     try:
+        print(f"📦 Petición recibida — Plan: {plan}, Idioma: {lang}")
         session = stripe.checkout.Session.create(
             mode="payment",
             line_items=[{"price": PRICE_MAP[plan], "quantity": 1}],
+            
+            # ✅ URLs según idioma
             success_url=f"{DOMAIN}{lang_prefix}/success.html?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{DOMAIN}{lang_prefix}/cancel.html",
-            locale="es" if lang == "es" else "en",  # 👈 idioma de la pasarela Stripe
+            
+            # ✅ Mostrar Stripe en el idioma correcto
+            locale="es" if lang == "es" else "en",
+            
             allow_promotion_codes=True,
             payment_method_types=[
                 "card", "paypal", "revolut_pay", "amazon_pay", "naver_pay",
@@ -48,9 +58,11 @@ def create_checkout_session():
             metadata={"plan": plan, "lang": lang}
         )
 
+        print(f"🌍 Sesión Stripe creada | Idioma: {lang} | URL de éxito: {DOMAIN}{lang_prefix}/success.html")
         return jsonify({"sessionId": session.id})
+
     except Exception as e:
-        print(f"Error creando sesión de Stripe: {str(e)}")
+        print(f"❌ Error creando sesión Stripe: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
