@@ -22,26 +22,34 @@ PRICE_MAP = {
 
 @app.post("/create-checkout-session")
 def create_checkout_session():
-    data = request.get_json()
-    plan = (data or {}).get("plan")
+    data = request.get_json() or {}
+    plan = data.get("plan")
+    lang = (data.get("lang") or "en").lower()
+
     if plan not in PRICE_MAP:
         return jsonify({"error": "Plan inválido"}), 400
+
+    # Prefijo de idioma en URLs
+    lang_prefix = "/es" if lang == "es" else ""
 
     try:
         session = stripe.checkout.Session.create(
             mode="payment",
             line_items=[{"price": PRICE_MAP[plan], "quantity": 1}],
-            success_url=f"{DOMAIN}/success.html",
-            cancel_url=f"{DOMAIN}/cancel.html",
+            success_url=f"{DOMAIN}{lang_prefix}/success.html?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{DOMAIN}{lang_prefix}/cancel.html",
+            locale="es" if lang == "es" else "en",  # 👈 idioma de la pasarela Stripe
             allow_promotion_codes=True,
-            payment_method_types=["card", "paypal", "revolut_pay", "amazon_pay", "naver_pay", "link", "payco", "bancontact", "blik", "eps", "klarna"],  # 👈 Fuerza a mostrar tarjeta
+            payment_method_types=[
+                "card", "paypal", "revolut_pay", "amazon_pay", "naver_pay",
+                "link", "payco", "bancontact", "blik", "eps", "klarna"
+            ],
             automatic_tax={"enabled": False},
-            metadata={"plan": plan}
+            metadata={"plan": plan, "lang": lang}
         )
 
         return jsonify({"sessionId": session.id})
     except Exception as e:
-        # Es útil loguear el error real en el servidor para depuración
         print(f"Error creando sesión de Stripe: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
