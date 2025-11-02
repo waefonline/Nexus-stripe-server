@@ -4,12 +4,20 @@ from flask_cors import CORS
 import stripe
 
 app = Flask(__name__)
-CORS(app, origins=[
-    "https://nexuscopier.com",
-    "https://www.nexuscopier.com",
-])
 
-# 🔑 Cargar claves desde variables de entorno (Render las inyecta)
+# ✅ Configuración CORS completa y explícita
+CORS(app, 
+     origins=[
+         "https://nexuscopier.com",
+         "https://www.nexuscopier.com"
+     ],
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Accept"],
+     supports_credentials=False,
+     max_age=86400
+)
+
+# 🔒 Cargar claves desde variables de entorno (Render las inyecta)
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 DOMAIN = os.getenv("DOMAIN", "https://nexuscopier.com")
@@ -20,8 +28,12 @@ PRICE_MAP = {
     "3": "price_1SNIPW2KiTHorHsULLp42FJE",  # Business 3 cuentas - 149€
 }
 
-@app.post("/create-checkout-session")
+@app.route("/create-checkout-session", methods=["POST", "OPTIONS"])
 def create_checkout_session():
+    # Manejar preflight request
+    if request.method == "OPTIONS":
+        return "", 200
+    
     data = request.get_json() or {}
     plan = data.get("plan")
     lang = (data.get("lang") or "").lower()
@@ -58,7 +70,7 @@ def create_checkout_session():
             metadata={"plan": plan, "lang": lang}
         )
 
-        print(f"🌍 Sesión Stripe creada | Idioma: {lang} | URL de éxito: {DOMAIN}{lang_prefix}/success.html")
+        print(f"🌐 Sesión Stripe creada | Idioma: {lang} | URL de éxito: {DOMAIN}{lang_prefix}/success.html")
         return jsonify({"sessionId": session.id})
 
     except Exception as e:
@@ -66,7 +78,7 @@ def create_checkout_session():
         return jsonify({"error": str(e)}), 500
 
 
-@app.post("/webhook")
+@app.route("/webhook", methods=["POST"])
 def webhook():
     payload = request.data
     sig_header = request.headers.get("Stripe-Signature")
