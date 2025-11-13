@@ -23,9 +23,9 @@ WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 DOMAIN = os.getenv("DOMAIN", "https://nexuscopier.com")
 
 PRICE_MAP = {
-    "1": "price_1SNINe2KiTHorHsUTyGDSAtS",  # Starter 1 cuenta - 59€
-    "2": "price_1SNIO62KiTHorHsUdJbaUL1Q",  # Pro 2 cuentas - 89€
-    "3": "price_1SNIPW2KiTHorHsULLp42FJE",  # Business 3 cuentas - 149€
+    "1": "price_1ST2Cg2KiTHorHsUc2nE0SEh",  # Starter 1 cuenta - 59$
+    "2": "price_1ST2Da2KiTHorHsUpkfJ0BJn",  # Pro 2 cuentas - 89$
+    "3": "price_1ST2E32KiTHorHsULapHHGRG",  # Business 3 cuentas - 149$
 }
 
 @app.route("/create-checkout-session", methods=["POST", "OPTIONS"])
