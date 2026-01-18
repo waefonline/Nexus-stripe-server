@@ -130,7 +130,7 @@ def create_checkout_session():
 
 
 # ============================================
-# WEBHOOK HANDLER (CON TRACKING DE REFERIDOS)
+# WEBHOOK HANDLER (CON TRACKING DE REFERIDOS Y CUPONES)
 # ============================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -145,48 +145,91 @@ def webhook():
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        metadata = session.get("metadata") or {}
-        
-        plan = metadata.get("plan")
-        plan_name = metadata.get("plan_name", f"Plan {plan}")
-        email = session.get("customer_details", {}).get("email")
-        amount = session.get("amount_total", 0) / 100  # Convertir de centavos
-        currency = session.get("currency", "usd").upper()
-        referral_code = metadata.get("referral_code")
-        
-        print(f"✅ Pago completado: {email} compró {plan_name} por ${amount} {currency}")
-        
-        # 🤝 Registrar venta de afiliado si hay código
-        if referral_code:
-            print(f"🎉 ¡VENTA DE AFILIADO!")
-            print(f"   Código: {referral_code}")
-            print(f"   Email cliente: {email}")
-            print(f"   Plan: {plan_name}")
-            print(f"   Monto: ${amount} {currency}")
-            print(f"   Fecha: {datetime.now().isoformat()}")
-            
-            # Aquí podrías:
-            # 1. Guardar en base de datos
-            # 2. Enviar notificación por email
-            # 3. Llamar a Google Sheets API
-            # 4. Enviar a un webhook externo
-            
-            # Ejemplo: Enviar a Google Apps Script (descomentar si lo necesitas)
-            # try:
-            #     import requests
-            #     requests.post("TU_GOOGLE_SCRIPT_URL", json={
-            #         "type": "affiliate_sale",
-            #         "referral_code": referral_code,
-            #         "customer_email": email,
-            #         "amount": amount,
-            #         "currency": currency,
-            #         "plan": plan_name,
-            #         "date": datetime.now().isoformat()
-            #     })
-            # except Exception as e:
-            #     print(f"Error enviando a Google Script: {e}")
+        handle_successful_payment(session)
 
     return "", 200
+
+
+def handle_successful_payment(session):
+    """
+    Procesa un pago exitoso y detecta códigos de afiliado de dos fuentes:
+    1. metadata.referral_code (capturado via URL ?ref=CODE)
+    2. Cupón de Stripe usado en checkout (creado para cada afiliado)
+    """
+    metadata = session.get("metadata") or {}
+    
+    plan = metadata.get("plan")
+    plan_name = metadata.get("plan_name", f"Plan {plan}")
+    email = session.get("customer_details", {}).get("email")
+    amount = session.get("amount_total", 0) / 100
+    currency = session.get("currency", "usd").upper()
+    
+    # Fuente 1: Código de referido via URL (metadata)
+    referral_code = metadata.get("referral_code")
+    
+    # Fuente 2: Cupón de Stripe usado en checkout
+    coupon_code = None
+    discount_info = session.get("total_details", {}).get("breakdown", {}).get("discounts", [])
+    
+    # También intentar obtener el cupón del campo discount
+    if session.get("discounts"):
+        try:
+            # Obtener información del descuento aplicado
+            for discount_id in session.get("discounts", []):
+                discount = stripe.Discount.retrieve(discount_id)
+                if discount and discount.coupon:
+                    coupon_code = discount.coupon.name or discount.coupon.id
+                    break
+        except Exception as e:
+            print(f"⚠️ Error obteniendo info de cupón: {e}")
+    
+    # Intentar obtener de la sesión expandida si no lo tenemos
+    if not coupon_code:
+        try:
+            # Obtener la sesión con información expandida de descuentos
+            expanded_session = stripe.checkout.Session.retrieve(
+                session.id,
+                expand=['total_details.breakdown.discounts.discount.coupon']
+            )
+            discounts = expanded_session.get("total_details", {}).get("breakdown", {}).get("discounts", [])
+            for d in discounts:
+                if d.get("discount", {}).get("coupon", {}).get("name"):
+                    coupon_code = d["discount"]["coupon"]["name"]
+                    break
+                elif d.get("discount", {}).get("coupon", {}).get("id"):
+                    coupon_code = d["discount"]["coupon"]["id"]
+                    break
+        except Exception as e:
+            print(f"⚠️ Error expandiendo sesión: {e}")
+    
+    print(f"✅ Pago completado: {email} compró {plan_name} por ${amount} {currency}")
+    
+    # Determinar el código de afiliado (prioridad: metadata > cupón)
+    affiliate_code = referral_code or coupon_code
+    affiliate_source = None
+    
+    if referral_code:
+        affiliate_source = "url_referral"
+    elif coupon_code:
+        affiliate_source = "stripe_coupon"
+    
+    if affiliate_code:
+        print(f"🎉 ¡VENTA DE AFILIADO!")
+        print(f"   Código: {affiliate_code}")
+        print(f"   Fuente: {affiliate_source}")
+        print(f"   Email cliente: {email}")
+        print(f"   Plan: {plan_name}")
+        print(f"   Monto: ${amount} {currency}")
+        print(f"   Fecha: {datetime.now().isoformat()}")
+        
+        # Aquí podrías:
+        # 1. Guardar en base de datos
+        # 2. Enviar notificación por email
+        # 3. Llamar a Google Sheets API
+        
+    else:
+        print(f"ℹ️ Venta sin código de afiliado")
+
 
 
 # ============================================
