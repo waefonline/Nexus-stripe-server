@@ -2,6 +2,7 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import stripe
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -9,7 +10,9 @@ app = Flask(__name__)
 CORS(app, 
      origins=[
          "https://nexuscopier.com",
-         "https://www.nexuscopier.com"
+         "https://www.nexuscopier.com",
+         "http://localhost:5500",  # Para desarrollo local
+         "http://127.0.0.1:5500"
      ],
      methods=["GET", "POST", "OPTIONS"],
      allow_headers=["Content-Type", "Accept"],
@@ -28,6 +31,28 @@ PRICE_MAP = {
     "3": "price_1ST2E32KiTHorHsULapHHGRG",  # Business 3 cuentas - 149$
 }
 
+PLAN_NAMES = {
+    "1": {"en": "Nexus Copier - Starter (1 Account)", "es": "Nexus Copier - Starter (1 Cuenta)"},
+    "2": {"en": "Nexus Copier - Pro (2 Accounts)", "es": "Nexus Copier - Pro (2 Cuentas)"},
+    "3": {"en": "Nexus Copier - Business (3 Accounts)", "es": "Nexus Copier - Business (3 Cuentas)"},
+}
+
+# ============================================
+# HEALTH CHECK
+# ============================================
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status": "ok",
+        "service": "Nexus Stripe Server",
+        "version": "2.0",
+        "features": ["checkout", "referrals", "webhooks"]
+    })
+
+
+# ============================================
+# CREATE CHECKOUT SESSION (CON REFERIDOS)
+# ============================================
 @app.route("/create-checkout-session", methods=["POST", "OPTIONS"])
 def create_checkout_session():
     # Manejar preflight request
@@ -37,6 +62,7 @@ def create_checkout_session():
     data = request.get_json() or {}
     plan = data.get("plan")
     lang = (data.get("lang") or "").lower()
+    referral_code = data.get("referral_code")  # 🆕 Capturar código de referido
 
     # Aseguramos que el idioma sea correcto
     if lang not in ["es", "en"]:
@@ -49,7 +75,23 @@ def create_checkout_session():
     lang_prefix = "/es" if lang == "es" else ""
 
     try:
-        print(f"📦 Petición recibida — Plan: {plan}, Idioma: {lang}")
+        # 📊 Construir metadatos con código de referido
+        metadata = {
+            "plan": plan,
+            "plan_name": PLAN_NAMES.get(plan, {}).get(lang, f"Plan {plan}"),
+            "lang": lang,
+            "source": "website"
+        }
+        
+        # 🤝 Añadir código de referido si existe
+        if referral_code and referral_code.strip():
+            clean_code = referral_code.strip().upper()
+            metadata["referral_code"] = clean_code
+            metadata["is_referral"] = "true"
+            print(f"🤝 Código de referido capturado: {clean_code}")
+        
+        print(f"📦 Petición recibida — Plan: {plan}, Idioma: {lang}, Referral: {referral_code or 'ninguno'}")
+        
         session = stripe.checkout.Session.create(
             mode="payment",
             line_items=[{"price": PRICE_MAP[plan], "quantity": 1}],
@@ -67,10 +109,19 @@ def create_checkout_session():
                 "link", "payco", "bancontact", "blik", "eps", "klarna"
             ],
             automatic_tax={"enabled": False},
-            metadata={"plan": plan, "lang": lang}
+            
+            # 📊 Metadatos con código de referido
+            metadata=metadata,
+            
+            # 🆕 Mensaje personalizado en checkout
+            custom_text={
+                "submit": {
+                    "message": "Tu licencia será enviada por email en unos minutos." if lang == "es" else "Your license will be sent via email within minutes."
+                }
+            }
         )
 
-        print(f"🌐 Sesión Stripe creada | Idioma: {lang} | URL de éxito: {DOMAIN}{lang_prefix}/success.html")
+        print(f"🌐 Sesión Stripe creada | ID: {session.id} | Referral: {metadata.get('referral_code', 'N/A')}")
         return jsonify({"sessionId": session.id})
 
     except Exception as e:
@@ -78,6 +129,9 @@ def create_checkout_session():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================
+# WEBHOOK HANDLER (CON TRACKING DE REFERIDOS)
+# ============================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     payload = request.data
@@ -86,15 +140,138 @@ def webhook():
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
     except Exception as e:
+        print(f"⚠️ Error verificando webhook: {str(e)}")
         return str(e), 400
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        plan = (session.get("metadata") or {}).get("plan")
+        metadata = session.get("metadata") or {}
+        
+        plan = metadata.get("plan")
+        plan_name = metadata.get("plan_name", f"Plan {plan}")
         email = session.get("customer_details", {}).get("email")
-        print(f"✅ Pago completado: {email} compró el plan {plan}")
+        amount = session.get("amount_total", 0) / 100  # Convertir de centavos
+        currency = session.get("currency", "usd").upper()
+        referral_code = metadata.get("referral_code")
+        
+        print(f"✅ Pago completado: {email} compró {plan_name} por ${amount} {currency}")
+        
+        # 🤝 Registrar venta de afiliado si hay código
+        if referral_code:
+            print(f"🎉 ¡VENTA DE AFILIADO!")
+            print(f"   Código: {referral_code}")
+            print(f"   Email cliente: {email}")
+            print(f"   Plan: {plan_name}")
+            print(f"   Monto: ${amount} {currency}")
+            print(f"   Fecha: {datetime.now().isoformat()}")
+            
+            # Aquí podrías:
+            # 1. Guardar en base de datos
+            # 2. Enviar notificación por email
+            # 3. Llamar a Google Sheets API
+            # 4. Enviar a un webhook externo
+            
+            # Ejemplo: Enviar a Google Apps Script (descomentar si lo necesitas)
+            # try:
+            #     import requests
+            #     requests.post("TU_GOOGLE_SCRIPT_URL", json={
+            #         "type": "affiliate_sale",
+            #         "referral_code": referral_code,
+            #         "customer_email": email,
+            #         "amount": amount,
+            #         "currency": currency,
+            #         "plan": plan_name,
+            #         "date": datetime.now().isoformat()
+            #     })
+            # except Exception as e:
+            #     print(f"Error enviando a Google Script: {e}")
 
     return "", 200
+
+
+# ============================================
+# 🆕 VER VENTAS DE AFILIADOS (ADMIN)
+# ============================================
+@app.route("/referral-sales", methods=["GET"])
+def get_referral_sales():
+    """
+    Endpoint para ver las ventas realizadas con códigos de referido.
+    Útil para calcular comisiones de afiliados.
+    
+    Uso: GET /referral-sales?limit=50
+    """
+    try:
+        limit = min(int(request.args.get("limit", 100)), 100)
+        
+        # Obtener sesiones de checkout recientes
+        sessions = stripe.checkout.Session.list(limit=limit)
+        
+        referral_sales = []
+        affiliates = {}
+        
+        for session in sessions.data:
+            # Solo sesiones pagadas con código de referido
+            if session.payment_status == "paid" and session.metadata:
+                referral_code = session.metadata.get("referral_code")
+                if referral_code:
+                    sale = {
+                        "session_id": session.id,
+                        "date": datetime.fromtimestamp(session.created).isoformat(),
+                        "referral_code": referral_code,
+                        "customer_email": session.customer_details.email if session.customer_details else "N/A",
+                        "amount": session.amount_total / 100,
+                        "currency": session.currency.upper(),
+                        "plan": session.metadata.get("plan_name", session.metadata.get("plan", "Unknown"))
+                    }
+                    referral_sales.append(sale)
+                    
+                    # Agrupar por código de afiliado
+                    if referral_code not in affiliates:
+                        affiliates[referral_code] = {
+                            "code": referral_code,
+                            "total_sales": 0,
+                            "total_amount": 0,
+                            "sales": []
+                        }
+                    affiliates[referral_code]["total_sales"] += 1
+                    affiliates[referral_code]["total_amount"] += sale["amount"]
+                    affiliates[referral_code]["sales"].append(sale)
+        
+        return jsonify({
+            "total_referral_sales": len(referral_sales),
+            "affiliates": list(affiliates.values())
+        })
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo ventas de referidos: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# 🆕 VER DETALLES DE UNA SESIÓN
+# ============================================
+@app.route("/session/<session_id>", methods=["GET"])
+def get_session(session_id):
+    """
+    Obtener detalles de una sesión específica.
+    Útil para debugging y verificación.
+    """
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+        return jsonify({
+            "id": session.id,
+            "status": session.status,
+            "payment_status": session.payment_status,
+            "customer_email": session.customer_details.email if session.customer_details else None,
+            "amount": session.amount_total / 100 if session.amount_total else 0,
+            "currency": session.currency,
+            "metadata": dict(session.metadata) if session.metadata else {},
+            "created": datetime.fromtimestamp(session.created).isoformat()
+        })
+    except stripe.error.InvalidRequestError:
+        return jsonify({"error": "Session not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
