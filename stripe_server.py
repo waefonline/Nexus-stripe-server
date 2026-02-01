@@ -1,4 +1,5 @@
 import os
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import stripe
@@ -25,6 +26,13 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 DOMAIN = os.getenv("DOMAIN", "https://nexuscopier.com")
 
+# 🆕 Google Apps Script URL para registro de licencias
+GOOGLE_SCRIPT_URL = os.getenv(
+    "GOOGLE_SCRIPT_URL", 
+    "https://script.google.com/macros/s/AKfycbwbufRIrKswV4IBxJPi_dmQQijN9qcdhvx-Gp-tAK6BiZDfTaV3iBPToUyPV_FoiQPS/exec"
+)
+GOOGLE_SCRIPT_TOKEN = os.getenv("GOOGLE_SCRIPT_TOKEN", "nexus_secure_live_202X")
+
 PRICE_MAP = {
     "1": "price_1ST2Cg2KiTHorHsUc2nE0SEh",  # Starter 1 cuenta - 59$
     "2": "price_1ST2Da2KiTHorHsUpkfJ0BJn",  # Pro 2 cuentas - 89$
@@ -37,6 +45,20 @@ PLAN_NAMES = {
     "3": {"en": "Nexus Copier - Business (3 Accounts)", "es": "Nexus Copier - Business (3 Cuentas)"},
 }
 
+# Mapeo de precio a cantidad de licencias
+LICENSES_BY_AMOUNT = [
+    (14900, 3),  # Business $149 = 3 licencias
+    (8900, 2),   # Pro $89 = 2 licencias
+    (5900, 1),   # Starter $59 = 1 licencia
+]
+
+def get_licenses_quantity(amount_cents):
+    """Determina la cantidad de licencias basándose en el monto pagado"""
+    for threshold, qty in LICENSES_BY_AMOUNT:
+        if amount_cents >= threshold:
+            return qty
+    return 1  # Default
+
 # ============================================
 # HEALTH CHECK
 # ============================================
@@ -45,8 +67,8 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "Nexus Stripe Server",
-        "version": "2.0",
-        "features": ["checkout", "referrals", "webhooks"]
+        "version": "3.0",
+        "features": ["checkout", "referrals", "webhooks", "license-registration"]
     })
 
 
@@ -130,51 +152,101 @@ def create_checkout_session():
 
 
 # ============================================
-# WEBHOOK HANDLER (CON TRACKING DE REFERIDOS Y CUPONES)
+# WEBHOOK HANDLER (CON REGISTRO DE LICENCIAS)
 # ============================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     payload = request.data
     sig_header = request.headers.get("Stripe-Signature")
 
+    # 1. Verificar firma del webhook
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
+    except stripe.error.SignatureVerificationError as e:
+        print(f"⚠️ Error verificando firma webhook: {str(e)}")
+        return "Invalid signature", 400
     except Exception as e:
-        print(f"⚠️ Error verificando webhook: {str(e)}")
+        print(f"⚠️ Error procesando webhook: {str(e)}")
         return str(e), 400
 
+    # 2. Procesar eventos
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         handle_successful_payment(session)
+    else:
+        print(f"ℹ️ Evento ignorado: {event['type']}")
 
+    # 3. Siempre responder 200 OK a Stripe
     return "", 200
 
 
 def handle_successful_payment(session):
     """
-    Procesa un pago exitoso y detecta códigos de afiliado de dos fuentes:
-    1. metadata.referral_code (capturado via URL ?ref=CODE)
-    2. Cupón de Stripe usado en checkout (creado para cada afiliado)
+    Procesa un pago exitoso:
+    1. Extrae información del cliente
+    2. Detecta códigos de afiliado
+    3. Llama al Google Apps Script para registrar la venta
     """
+    session_id = session.get("id", "unknown")
     metadata = session.get("metadata") or {}
     
-    plan = metadata.get("plan")
+    plan = metadata.get("plan", "1")
     plan_name = metadata.get("plan_name", f"Plan {plan}")
-    email = session.get("customer_details", {}).get("email")
-    amount = session.get("amount_total", 0) / 100
+    customer_details = session.get("customer_details") or {}
+    email = customer_details.get("email")
+    name = customer_details.get("name", "Customer")
+    amount_cents = session.get("amount_total", 0)
+    amount = amount_cents / 100
     currency = session.get("currency", "usd").upper()
     
-    # Fuente 1: Código de referido via URL (metadata)
+    # Determinar cantidad de licencias
+    licenses_qty = get_licenses_quantity(amount_cents)
+    
+    print(f"=" * 50)
+    print(f"✅ PAGO COMPLETADO")
+    print(f"   Session ID: {session_id}")
+    print(f"   Email: {email}")
+    print(f"   Nombre: {name}")
+    print(f"   Plan: {plan_name}")
+    print(f"   Monto: ${amount} {currency}")
+    print(f"   Licencias: {licenses_qty}")
+    
+    # Detectar código de afiliado
     referral_code = metadata.get("referral_code")
+    coupon_code = detect_coupon_code(session)
+    affiliate_code = referral_code or coupon_code
     
-    # Fuente 2: Cupón de Stripe usado en checkout
+    if affiliate_code:
+        print(f"   🎉 Afiliado: {affiliate_code}")
+    
+    print(f"=" * 50)
+    
+    # 🆕 REGISTRAR VENTA EN GOOGLE APPS SCRIPT
+    if email:
+        success = register_sale_in_google_script(
+            email=email,
+            name=name,
+            licenses_qty=licenses_qty,
+            session_id=session_id,
+            amount=amount,
+            plan=plan_name,
+            affiliate_code=affiliate_code
+        )
+        if success:
+            print(f"✅ Venta registrada en Google Script correctamente")
+        else:
+            print(f"⚠️ Error registrando venta en Google Script (revisar logs)")
+    else:
+        print(f"⚠️ No se pudo registrar: email no disponible")
+
+
+def detect_coupon_code(session):
+    """Detecta si se usó un cupón de descuento"""
     coupon_code = None
-    discount_info = session.get("total_details", {}).get("breakdown", {}).get("discounts", [])
     
-    # También intentar obtener el cupón del campo discount
+    # Intentar desde discounts
     if session.get("discounts"):
         try:
-            # Obtener información del descuento aplicado
             for discount_id in session.get("discounts", []):
                 discount = stripe.Discount.retrieve(discount_id)
                 if discount and discount.coupon:
@@ -183,12 +255,11 @@ def handle_successful_payment(session):
         except Exception as e:
             print(f"⚠️ Error obteniendo info de cupón: {e}")
     
-    # Intentar obtener de la sesión expandida si no lo tenemos
+    # Intentar desde sesión expandida
     if not coupon_code:
         try:
-            # Obtener la sesión con información expandida de descuentos
             expanded_session = stripe.checkout.Session.retrieve(
-                session.id,
+                session["id"],
                 expand=['total_details.breakdown.discounts.discount.coupon']
             )
             discounts = expanded_session.get("total_details", {}).get("breakdown", {}).get("discounts", [])
@@ -202,34 +273,67 @@ def handle_successful_payment(session):
         except Exception as e:
             print(f"⚠️ Error expandiendo sesión: {e}")
     
-    print(f"✅ Pago completado: {email} compró {plan_name} por ${amount} {currency}")
-    
-    # Determinar el código de afiliado (prioridad: metadata > cupón)
-    affiliate_code = referral_code or coupon_code
-    affiliate_source = None
-    
-    if referral_code:
-        affiliate_source = "url_referral"
-    elif coupon_code:
-        affiliate_source = "stripe_coupon"
-    
-    if affiliate_code:
-        print(f"🎉 ¡VENTA DE AFILIADO!")
-        print(f"   Código: {affiliate_code}")
-        print(f"   Fuente: {affiliate_source}")
-        print(f"   Email cliente: {email}")
-        print(f"   Plan: {plan_name}")
-        print(f"   Monto: ${amount} {currency}")
-        print(f"   Fecha: {datetime.now().isoformat()}")
-        
-        # Aquí podrías:
-        # 1. Guardar en base de datos
-        # 2. Enviar notificación por email
-        # 3. Llamar a Google Sheets API
-        
-    else:
-        print(f"ℹ️ Venta sin código de afiliado")
+    return coupon_code
 
+
+def register_sale_in_google_script(email, name, licenses_qty, session_id, amount, plan, affiliate_code=None):
+    """
+    Llama al Google Apps Script para registrar la venta y generar créditos de licencia.
+    Usa el endpoint doGet con action=register_sale
+    """
+    try:
+        params = {
+            "action": "register_sale",
+            "token": GOOGLE_SCRIPT_TOKEN,
+            "email": email,
+            "name": name,
+            "qty": licenses_qty,
+            "session_id": session_id,
+            "amount": amount,
+            "plan": plan
+        }
+        
+        if affiliate_code:
+            params["affiliate"] = affiliate_code
+        
+        print(f"📤 Enviando registro a Google Script...")
+        print(f"   URL: {GOOGLE_SCRIPT_URL}")
+        print(f"   Params: email={email}, qty={licenses_qty}, session={session_id[:20]}...")
+        
+        response = requests.get(
+            GOOGLE_SCRIPT_URL, 
+            params=params, 
+            timeout=30,
+            allow_redirects=True  # Google Script hace redirect 302
+        )
+        
+        print(f"📥 Respuesta Google Script: {response.status_code}")
+        print(f"   Body: {response.text[:200] if response.text else 'empty'}")
+        
+        # Google Script responde con JSON
+        if response.status_code == 200:
+            try:
+                result = response.json()
+                if result.get("success"):
+                    return True
+                else:
+                    print(f"⚠️ Google Script error: {result.get('error', 'Unknown')}")
+                    return False
+            except:
+                # Si no es JSON, verificar si contiene "success" en el texto
+                if "success" in response.text.lower():
+                    return True
+                return False
+        else:
+            print(f"⚠️ HTTP Error: {response.status_code}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        print(f"⚠️ Timeout llamando a Google Script (30s)")
+        return False
+    except Exception as e:
+        print(f"❌ Error llamando a Google Script: {str(e)}")
+        return False
 
 
 # ============================================
@@ -315,6 +419,33 @@ def get_session(session_id):
         return jsonify({"error": "Session not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# TEST ENDPOINT
+# ============================================
+@app.route("/test-google-script", methods=["GET"])
+def test_google_script():
+    """
+    Endpoint para probar la conexión con Google Apps Script
+    """
+    try:
+        response = requests.get(
+            GOOGLE_SCRIPT_URL,
+            params={"action": "ping", "token": GOOGLE_SCRIPT_TOKEN},
+            timeout=10,
+            allow_redirects=True
+        )
+        return jsonify({
+            "status": "ok" if response.status_code == 200 else "error",
+            "http_code": response.status_code,
+            "response": response.text[:500]
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
